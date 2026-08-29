@@ -33,7 +33,6 @@ static int is_ident_char(char c) {
     return isalnum((unsigned char)c) || c == '_';
 }
 
-/* tokenize, splitting identifiers from everything else */
 static Token *tokenize(const char *src, int *ntok) {
     int n = 0, cap = 0;
     Token *t = tok_alloc(&cap);
@@ -44,7 +43,6 @@ static Token *tokenize(const char *src, int *ntok) {
             while (*p && is_ident_char(*p)) p++;
             tok_push(&t, &n, &cap, start, (int)(p - start), 1);
         } else {
-            /* a run of non-identifier chars (spaces, newlines, punctuation) */
             const char *start = p;
             while (*p && !is_ident_char(*p)) p++;
             tok_push(&t, &n, &cap, start, (int)(p - start), 0);
@@ -54,17 +52,18 @@ static Token *tokenize(const char *src, int *ntok) {
     return t;
 }
 
-/* true if id equals s */
 static int eq(const char *a, const char *s) { return strcmp(a, s) == 0; }
 
-/* declare built-in vertex attributes that desktop GL provides for free
- * but GLSL ES 3.00 removed. Returns appended declarations into 'out'. */
-static void emit_builtin_decls(const Token *t, int n, glsl_stage stage, char *buf, size_t *pos, size_t size) {
+/* Detect every desktop-only construct we must rewrite, and emit the
+ * matching GLSL ES 3.00 declarations. */
+static void emit_builtin_decls(const Token *t, int n, glsl_stage stage,
+                               char *buf, size_t *pos, size_t size,
+                               int *clip_n) {
     int need_vertex = 0, need_normal = 0, need_color = 0, need_sec = 0;
     int need_mtc[8] = {0};
     int need_texcoord = 0, need_fog = 0, need_clipvertex = 0;
     int uses_fragcolor = 0, uses_fragdata = 0, max_fd = 0;
-    int uses_fragdepth = 0;
+    int uses_clipdist = 0, max_cd = 0;
 
     for (int i = 0; i < n; i++) {
         if (!t[i].is_id) continue;
@@ -77,13 +76,18 @@ static void emit_builtin_decls(const Token *t, int n, glsl_stage stage, char *bu
         else if (eq(s, "gl_TexCoord")) need_texcoord = 1;
         else if (eq(s, "gl_ClipVertex")) need_clipvertex = 1;
         else if (eq(s, "gl_FragColor")) uses_fragcolor = 1;
-        else if (eq(s, "gl_FragDepth")) uses_fragdepth = 1;
         else if (eq(s, "gl_FragData")) {
             uses_fragdata = 1;
-            /* try to find the index literal after [ */
             if (i + 2 < n && eq(t[i+1].text, "[")) {
                 int v = atoi(t[i+2].text);
                 if (v > max_fd) max_fd = v;
+            }
+        }
+        else if (eq(s, "gl_ClipDistance")) {
+            uses_clipdist = 1;
+            if (i + 2 < n && eq(t[i+1].text, "[")) {
+                int v = atoi(t[i+2].text);
+                if (v > max_cd) max_cd = v;
             }
         }
         for (int k = 0; k < 8; k++) {
@@ -93,74 +97,89 @@ static void emit_builtin_decls(const Token *t, int n, glsl_stage stage, char *bu
         }
     }
 
+    if (clip_n) *clip_n = uses_clipdist ? (max_cd + 1) : 0;
+
     if (stage == STAGE_VERTEX) {
-        if (need_vertex) { snprintf(buf + *pos, size - *pos, "in vec4 gl_Vertex;\n"); *pos += strlen(buf + *pos); }
-        if (need_normal) { snprintf(buf + *pos, size - *pos, "in vec3 gl_Normal;\n"); *pos += strlen(buf + *pos); }
-        if (need_color)  { snprintf(buf + *pos, size - *pos, "in vec4 gl_Color;\n"); *pos += strlen(buf + *pos); }
-        if (need_sec)    { snprintf(buf + *pos, size - *pos, "in vec4 gl_SecondaryColor;\n"); *pos += strlen(buf + *pos); }
-        if (need_fog)    { snprintf(buf + *pos, size - *pos, "in float gl_FogCoord;\n"); *pos += strlen(buf + *pos); }
-        if (need_texcoord){ snprintf(buf + *pos, size - *pos, "out vec4 gl_TexCoord[8];\n"); *pos += strlen(buf + *pos); }
-        if (need_clipvertex){ snprintf(buf + *pos, size - *pos, "out vec4 gl_ClipVertex;\n"); *pos += strlen(buf + *pos); }
+        if (need_vertex)   { snprintf(buf+*pos, size-*pos, "in vec4 gl_Vertex;\n"); *pos += strlen(buf+*pos); }
+        if (need_normal)   { snprintf(buf+*pos, size-*pos, "in vec3 gl_Normal;\n"); *pos += strlen(buf+*pos); }
+        if (need_color)    { snprintf(buf+*pos, size-*pos, "in vec4 gl_Color;\n"); *pos += strlen(buf+*pos); }
+        if (need_sec)      { snprintf(buf+*pos, size-*pos, "in vec4 gl_SecondaryColor;\n"); *pos += strlen(buf+*pos); }
+        if (need_fog)      { snprintf(buf+*pos, size-*pos, "in float gl_FogCoord;\n"); *pos += strlen(buf+*pos); }
+        if (need_texcoord) { snprintf(buf+*pos, size-*pos, "out vec4 gl_TexCoord[8];\n"); *pos += strlen(buf+*pos); }
+        if (need_clipvertex){ snprintf(buf+*pos, size-*pos, "out vec4 gl_ClipVertex;\n"); *pos += strlen(buf+*pos); }
         for (int k = 0; k < 8; k++) if (need_mtc[k]) {
-            snprintf(buf + *pos, size - *pos, "in vec4 gl_MultiTexCoord%d;\n", k); *pos += strlen(buf + *pos);
+            snprintf(buf+*pos, size-*pos, "in vec4 gl_MultiTexCoord%d;\n", k); *pos += strlen(buf+*pos);
+        }
+        if (uses_clipdist) {
+            snprintf(buf+*pos, size-*pos, "out float _clipDist[%d];\n", max_cd + 1); *pos += strlen(buf+*pos);
         }
     } else {
-        if (need_texcoord){ snprintf(buf + *pos, size - *pos, "in vec4 gl_TexCoord[8];\n"); *pos += strlen(buf + *pos); }
-        if (uses_fragcolor){ snprintf(buf + *pos, size - *pos, "out vec4 _fragColor;\n"); *pos += strlen(buf + *pos); }
-        if (uses_fragdata) {
-            snprintf(buf + *pos, size - *pos, "out vec4 gl_FragData[%d];\n", max_fd + 1); *pos += strlen(buf + *pos);
+        if (need_texcoord) { snprintf(buf+*pos, size-*pos, "in vec4 gl_TexCoord[8];\n"); *pos += strlen(buf+*pos); }
+        if (uses_fragcolor){ snprintf(buf+*pos, size-*pos, "out vec4 _fragColor;\n"); *pos += strlen(buf+*pos); }
+        if (uses_fragdata) { snprintf(buf+*pos, size-*pos, "out vec4 gl_FragData[%d];\n", max_fd + 1); *pos += strlen(buf+*pos); }
+        if (uses_clipdist) {
+            snprintf(buf+*pos, size-*pos, "in float _clipDist[%d];\n", max_cd + 1); *pos += strlen(buf+*pos);
         }
-        if (uses_fragdepth) { /* gl_FragDepth is built-in in ES3, nothing to add */ }
     }
+}
+
+/* map a desktop texture sampler call to its GLSL ES 3.00 equivalent */
+static const char *tex_rewrite(const char *s) {
+    if (eq(s, "texture2D") || eq(s, "texture3D") || eq(s, "textureCube")) return "texture";
+    if (eq(s, "texture2DLod") || eq(s, "texture3DLod") || eq(s, "textureCubeLod")) return "textureLod";
+    if (eq(s, "texture2DProj") || eq(s, "textureCubeProj")) return "textureProj";
+    if (eq(s, "texture2DProjLod") || eq(s, "texture2DProjLodEXT")) return "textureProjLod";
+    if (eq(s, "texture2DGrad") || eq(s, "texture2DGradEXT")) return "textureGrad";
+    if (eq(s, "shadow2D")) return "texture";
+    if (eq(s, "shadow2DProj")) return "textureProj";
+    return NULL;
 }
 
 char *glsl_translate(const char *src, glsl_stage stage) {
     int n = 0;
     Token *t = tokenize(src, &n);
 
-    /* compute output size: worst case ~2x + decls */
-    size_t outsize = strlen(src) * 2 + 2048;
+    size_t outsize = strlen(src) * 3 + 4096;
     char *out = malloc(outsize);
     size_t pos = 0;
 
-    /* header */
     snprintf(out + pos, outsize - pos, "#version 300 es\n");
     pos += strlen(out + pos);
     if (stage == STAGE_FRAGMENT) {
-        snprintf(out + pos, outsize - pos, "precision highp float;\n");
-        pos += strlen(out + pos);
-        snprintf(out + pos, outsize - pos, "precision highp int;\n");
-        pos += strlen(out + pos);
+        snprintf(out + pos, outsize - pos, "precision highp float;\n"); pos += strlen(out + pos);
+        snprintf(out + pos, outsize - pos, "precision highp int;\n");   pos += strlen(out + pos);
     } else {
-        snprintf(out + pos, outsize - pos, "precision highp float;\n");
-        pos += strlen(out + pos);
+        snprintf(out + pos, outsize - pos, "precision highp float;\n"); pos += strlen(out + pos);
     }
 
-    emit_builtin_decls(t, n, stage, out, &pos, outsize);
+    int clip_n = 0;
+    emit_builtin_decls(t, n, stage, out, &pos, outsize, &clip_n);
 
-    /* scan for #version to skip original */
     int i = 0;
+    /* state to find `void main() {` so we can inject clip-discard in fragment */
+    int saw_main = 0, saw_lparen = 0, saw_rparen = 0;
 
-    /* we translate token by token, skipping the original #version line */
     for (i = 0; i < n; i++) {
         if (!t[i].is_id) {
-            /* check for #version line: a token starting with '#' */
             if (strncmp(t[i].text, "#", 1) == 0) {
-                /* skip tokens until we hit a newline-containing token */
                 int j = i;
-                while (j < n) {
-                    if (strchr(t[j].text, '\n')) { i = j; break; }
-                    j++;
-                }
+                while (j < n) { if (strchr(t[j].text, '\n')) { i = j; break; } j++; }
                 if (i >= n) break;
-                /* emit the newline token's trailing part after the newline */
                 const char *nl = strchr(t[i].text, '\n');
-                if (nl) {
-                    /* preserve only what's after the newline */
-                    snprintf(out + pos, outsize - pos, "%s", nl + 1);
-                    pos += strlen(out + pos);
-                }
+                if (nl) { snprintf(out+pos, outsize-pos, "%s", nl + 1); pos += strlen(out+pos); }
                 continue;
+            }
+            /* detect main() opening brace to inject clip discard */
+            if (stage == STAGE_FRAGMENT && clip_n > 0 && saw_main && saw_lparen && saw_rparen) {
+                if (eq(t[i].text, "{")) {
+                    snprintf(out+pos, outsize-pos, "{\n"); pos += strlen(out+pos);
+                    for (int c = 0; c < clip_n; c++) {
+                        snprintf(out+pos, outsize-pos, "  if (_clipDist[%d] < 0.0) discard;\n", c);
+                        pos += strlen(out+pos);
+                    }
+                    saw_main = saw_lparen = saw_rparen = 0;
+                    continue;
+                }
             }
             snprintf(out + pos, outsize - pos, "%s", t[i].text);
             pos += strlen(out + pos);
@@ -170,17 +189,11 @@ char *glsl_translate(const char *src, glsl_stage stage) {
         const char *s = t[i].text;
         const char *repl = NULL;
 
-        if (eq(s, "attribute")) {
-            repl = (stage == STAGE_VERTEX) ? "in" : "in";
-        } else if (eq(s, "varying")) {
-            repl = (stage == STAGE_VERTEX) ? "out" : "in";
-        } else if (eq(s, "texture2D") || eq(s, "texture3D") || eq(s, "textureCube")) {
-            repl = "texture";
-        } else if (eq(s, "texture2DLod") || eq(s, "texture3DLod") || eq(s, "textureCubeLod")) {
-            repl = "textureLod";
-        } else if (eq(s, "gl_FragColor")) {
-            repl = "_fragColor";
-        }
+        if (eq(s, "attribute")) repl = "in";
+        else if (eq(s, "varying")) repl = (stage == STAGE_VERTEX) ? "out" : "in";
+        else if (eq(s, "gl_FragColor")) repl = "_fragColor";
+        else if (eq(s, "gl_ClipDistance")) repl = "_clipDist";
+        else repl = tex_rewrite(s);
 
         if (repl) {
             snprintf(out + pos, outsize - pos, "%s", repl);
@@ -189,13 +202,15 @@ char *glsl_translate(const char *src, glsl_stage stage) {
             snprintf(out + pos, outsize - pos, "%s", s);
             pos += strlen(out + pos);
         }
+
+        /* main() detection */
+        if (eq(s, "main")) saw_main = 1;
+        else if (saw_main && eq(s, "(")) saw_lparen = 1;
+        else if (saw_main && saw_lparen && eq(s, ")")) saw_rparen = 1;
     }
 
-    /* cleanup */
     for (int k = 0; k < n; k++) free(t[k].text);
     free(t);
-
-    /* trim */
     out[pos] = '\0';
     return out;
 }

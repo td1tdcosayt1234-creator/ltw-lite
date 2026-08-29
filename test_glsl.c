@@ -94,6 +94,51 @@ int main(void) {
     check("fragment-mrt", f2, "gl_FragData[0] = vec4(1.0);");
     free(f2);
 
+    /* Clip distance / cull distance emulation (the LTW gap that breaks
+     * Create + Immersive Portals). gl_ClipDistance must become a varying
+     * and the fragment shader must discard clipped fragments. */
+    const char *vclip =
+        "#version 150\n"
+        "void main() {\n"
+        "  gl_ClipDistance[0] = dot(gl_Vertex, vec4(1.0,0.0,0.0,0.0));\n"
+        "  gl_Position = vec4(0.0);\n"
+        "}\n";
+    char *vc = glsl_translate(vclip, STAGE_VERTEX);
+    printf("=== VERTEX with clip distance ===\n%s\n", vc);
+    check("clip-vert", vc, "out float _clipDist[1];");
+    check("clip-vert", vc, "_clipDist[0] = dot(gl_Vertex");
+    free(vc);
+
+    const char *fclip =
+        "#version 150\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(1.0);\n"
+        "}\n";
+    /* simulate that clip distance is used (linker would provide it) */
+    char *fc = glsl_translate(fclip, STAGE_FRAGMENT);
+    printf("=== FRAGMENT (clip discard injected only if clip used) ===\n%s\n", fc);
+    /* no clip used here, so no discard injected */
+    check_not("clip-frag", fc, "_clipDist");
+    free(fc);
+
+    /* texture variant mapping */
+    const char *ftex =
+        "#version 150\n"
+        "uniform sampler2D t; uniform sampler2DShadow s;\n"
+        "in vec2 uv; in vec4 uvp;\n"
+        "void main() {\n"
+        "  vec4 a = texture2DProj(t, uvp);\n"
+        "  float b = shadow2D(s, vec3(uv, 0.5)).x;\n"
+        "  float c = texture2DGrad(t, uv, vec2(1.0), vec2(1.0)).r;\n"
+        "  gl_FragColor = a + vec4(b) + vec4(c);\n"
+        "}\n";
+    char *ft = glsl_translate(ftex, STAGE_FRAGMENT);
+    printf("=== FRAGMENT texture variants ===\n%s\n", ft);
+    check("texvar", ft, "textureProj(t, uvp)");
+    check("texvar", ft, "texture(s, vec3(uv, 0.5))");
+    check("texvar", ft, "textureGrad(t, uv, vec2(1.0), vec2(1.0))");
+    free(ft);
+
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

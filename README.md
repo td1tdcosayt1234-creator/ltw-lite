@@ -29,9 +29,21 @@ without the game knowing.
 
 - `glsl_translate.h/.c` — the real, tested GLSL translator (the part that prevents the
   Create-style crash). Pure C, no GPU required.
-- `test_glsl.c` — headless unit tests (Create-like vertex/fragment/MRT shaders).
+- `test_glsl.c` — headless unit tests (Create-like vertex/fragment/MRT/clip/texture shaders).
 - `gl_wrapper.c` — structural skeleton showing how the translator plugs into a
-  GL→GLES dispatch (transform feedback / VAO forwards). Build only on a GLES target.
+  GL→GLES dispatch (transform feedback / VAO / MRT / clip-plane emulation forwards).
+  Build only on a GLES target.
+
+## What this fixes for Create-style mods
+
+| Problem | Status | How |
+|---|---|---|
+| `attribute`/`varying`/`texture2D`/`gl_FragColor`/`gl_FragData` | **fixed** | `glsl_translate` rewrites them to ES 3.00 |
+| `gl_ClipDistance` / user clip planes (`gl_ClipPlane`, `GL_CLIP_PLANEi`) | **fixed (emulated)** | clip distance → varying; fragment discards where `< 0` |
+| `texture2DProj`/`shadow2D`/`texture2DGrad`/… | **fixed** | mapped to `textureProj`/`texture`/`textureGrad` |
+| Transform feedback / vertex pulling | **native forward** | GLES 3.0 has real transform feedback |
+| Multiple render targets | **native forward** | GLES 3.0 `glDrawBuffers` |
+| VAOs | **native forward** | GLES 3.0 `glVertexArray*` |
 
 ## Build & test (no GPU needed)
 
@@ -47,16 +59,20 @@ make gles       # requires GLESv2/EGL dev libraries
 
 ## Honest limitations
 
-This is **not** a drop-in LTW replacement. It is a focused, correct foundation that solves
-the **shader-translation** half of the Create crash. The remaining hard parts LTW itself
-still struggles with (per the project roadmap: *"resolve issues with Create"*) are:
+This solves the **API/shader-translation** layer that causes Create to fail to *compile*
+and to *clip incorrectly*. It is **not** a full, drop-in LTW renderer and has **not** been
+run against real Minecraft + Create on a device (that needs an Android GLES driver and the
+game itself, which this environment lacks). The remaining real-world risks are:
 
-- clipping/cull distances (`GL_EXT_clip_cull_distance`) — not available in GLES 3.0,
-- full transform-feedback / vertex-pulling correctness,
-- buffer/uniform edge cases in large mods.
+- The older `glClipPlane()` + `GL_CLIP_PLANEi` form is stored as state but the plane
+  equation is only *baked into `gl_ClipDistance`* when the wrapper's shader generator is
+  wired to read `g_clip_planes` — that wiring lives in the host renderer, not here.
+- Large mods hit buffer/uniform/extension edge cases that only show up at runtime.
+- Performance: a pure GLES 3.0 backend trades some features for speed; this is the same
+  trade LTW makes.
 
-Solving those requires extending `gl_wrapper.c` against a real GLES driver and testing with
-actual Minecraft + Create, which can't be done in this environment.
+To actually run Create on mobile, this code must be integrated into the LTW/Amethyst shader
+pipeline and validated on-device.
 
 ## License
 
