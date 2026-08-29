@@ -54,8 +54,71 @@ static Token *tokenize(const char *src, int *ntok) {
 
 static int eq(const char *a, const char *s) { return strcmp(a, s) == 0; }
 
-/* Detect every desktop-only construct we must rewrite, and emit the
- * matching GLSL ES 3.00 declarations. */
+static int is_emulated_or_core_ext(const char *name) {
+    static const char *drop[] = {
+        "GL_EXT_clip_cull_distance",
+        "GL_ARB_clip_distance",
+        "GL_ARB_shader_texture_lod",
+        "GL_EXT_shader_texture_lod",
+        "GL_ARB_draw_buffers",
+        "GL_EXT_draw_buffers",
+        "GL_ARB_texture_rectangle",
+        "GL_EXT_texture_rectangle",
+        "GL_ARB_texture_non_power_of_two",
+        "GL_OES_standard_derivatives",
+        "GL_ARB_shading_language_100",
+        "GL_EXT_gpu_shader4",
+        "GL_EXT_texture_filter_anisotropic",
+        "GL_ARB_fragment_program",
+        "GL_ARB_vertex_program",
+        "GL_ARB_shader_bit_encoding",
+        "GL_ARB_shader_objects",
+        NULL
+    };
+    for (int k = 0; drop[k]; k++)
+        if (eq(name, drop[k])) return 1;
+    return 0;
+}
+
+/* Drop #version and #extension lines whose feature is core/emulated, BEFORE
+ * tokenizing. Keeping them would make the GLES driver reject the shader
+ * ("Extension not supported" -- the fatal Create/Iris error, Pojav #4310). */
+static char *preprocess(const char *src) {
+    size_t len = strlen(src);
+    char *out = malloc(len * 2 + 1);
+    size_t o = 0;
+    const char *p = src;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t llen = nl ? (size_t)(nl - p) : strlen(p);
+        char *line = malloc(llen + 1);
+        memcpy(line, p, llen); line[llen] = '\0';
+
+        const char *ls = line;
+        while (*ls == ' ' || *ls == '\t') ls++;
+        int drop = 0;
+        if (strncmp(ls, "#version", 8) == 0) {
+            drop = 1;
+        } else if (strncmp(ls, "#extension", 10) == 0) {
+            const char *sp = ls + 10;
+            while (*sp == ' ' || *sp == '\t') sp++;
+            char ext[160]; int ei = 0;
+            while (*sp && *sp != ' ' && *sp != '\t' && *sp != ':' && ei < 159)
+                ext[ei++] = *sp++;
+            ext[ei] = '\0';
+            if (is_emulated_or_core_ext(ext)) drop = 1;
+        }
+        if (!drop) {
+            memcpy(out + o, p, llen); o += llen;
+            out[o++] = '\n';
+        }
+        free(line);
+        if (nl) p = nl + 1; else break;
+    }
+    out[o] = '\0';
+    return out;
+}
+
 static void emit_builtin_decls(const Token *t, int n, glsl_stage stage,
                                char *buf, size_t *pos, size_t size,
                                int *clip_n) {
@@ -123,7 +186,6 @@ static void emit_builtin_decls(const Token *t, int n, glsl_stage stage,
     }
 }
 
-/* map a desktop texture sampler call to its GLSL ES 3.00 equivalent */
 static const char *tex_rewrite(const char *s) {
     if (eq(s, "texture2D") || eq(s, "texture3D") || eq(s, "textureCube")) return "texture";
     if (eq(s, "texture2DLod") || eq(s, "texture3DLod") || eq(s, "textureCubeLod")) return "textureLod";
@@ -136,8 +198,9 @@ static const char *tex_rewrite(const char *s) {
 }
 
 char *glsl_translate(const char *src, glsl_stage stage) {
+    char *clean = preprocess(src);
     int n = 0;
-    Token *t = tokenize(src, &n);
+    Token *t = tokenize(clean, &n);
 
     size_t outsize = strlen(src) * 3 + 4096;
     char *out = malloc(outsize);
@@ -155,31 +218,20 @@ char *glsl_translate(const char *src, glsl_stage stage) {
     int clip_n = 0;
     emit_builtin_decls(t, n, stage, out, &pos, outsize, &clip_n);
 
-    int i = 0;
-    /* state to find `void main() {` so we can inject clip-discard in fragment */
     int saw_main = 0, saw_lparen = 0, saw_rparen = 0;
 
-    for (i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++) {
         if (!t[i].is_id) {
-            if (strncmp(t[i].text, "#", 1) == 0) {
-                int j = i;
-                while (j < n) { if (strchr(t[j].text, '\n')) { i = j; break; } j++; }
-                if (i >= n) break;
-                const char *nl = strchr(t[i].text, '\n');
-                if (nl) { snprintf(out+pos, outsize-pos, "%s", nl + 1); pos += strlen(out+pos); }
+            /* inject clip-distance discard right after main()'s opening brace */
+            if (stage == STAGE_FRAGMENT && clip_n > 0 &&
+                saw_main && saw_lparen && saw_rparen && eq(t[i].text, "{")) {
+                snprintf(out + pos, outsize - pos, "{\n"); pos += strlen(out + pos);
+                for (int c = 0; c < clip_n; c++)
+                    snprintf(out + pos, outsize - pos,
+                             "  if (_clipDist[%d] < 0.0) discard;\n", c);
+                pos += strlen(out + pos);
+                saw_main = saw_lparen = saw_rparen = 0;
                 continue;
-            }
-            /* detect main() opening brace to inject clip discard */
-            if (stage == STAGE_FRAGMENT && clip_n > 0 && saw_main && saw_lparen && saw_rparen) {
-                if (eq(t[i].text, "{")) {
-                    snprintf(out+pos, outsize-pos, "{\n"); pos += strlen(out+pos);
-                    for (int c = 0; c < clip_n; c++) {
-                        snprintf(out+pos, outsize-pos, "  if (_clipDist[%d] < 0.0) discard;\n", c);
-                        pos += strlen(out+pos);
-                    }
-                    saw_main = saw_lparen = saw_rparen = 0;
-                    continue;
-                }
             }
             snprintf(out + pos, outsize - pos, "%s", t[i].text);
             pos += strlen(out + pos);
@@ -203,7 +255,6 @@ char *glsl_translate(const char *src, glsl_stage stage) {
             pos += strlen(out + pos);
         }
 
-        /* main() detection */
         if (eq(s, "main")) saw_main = 1;
         else if (saw_main && eq(s, "(")) saw_lparen = 1;
         else if (saw_main && saw_lparen && eq(s, ")")) saw_rparen = 1;
@@ -211,6 +262,7 @@ char *glsl_translate(const char *src, glsl_stage stage) {
 
     for (int k = 0; k < n; k++) free(t[k].text);
     free(t);
+    free(clean);
     out[pos] = '\0';
     return out;
 }

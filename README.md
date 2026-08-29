@@ -36,19 +36,24 @@ without the game knowing.
 
 ## What this fixes for Create-style mods
 
-| Problem | Status | How |
-|---|---|---|
-| `attribute`/`varying`/`texture2D`/`gl_FragColor`/`gl_FragData` | **fixed** | `glsl_translate` rewrites them to ES 3.00 |
-| `gl_ClipDistance` / user clip planes (`gl_ClipPlane`, `GL_CLIP_PLANEi`) | **fixed (emulated)** | clip distance → varying; fragment discards where `< 0` |
-| `texture2DProj`/`shadow2D`/`texture2DGrad`/… | **fixed** | mapped to `textureProj`/`texture`/`textureGrad` |
-| Transform feedback / vertex pulling | **native forward** | GLES 3.0 has real transform feedback |
-| Multiple render targets | **native forward** | GLES 3.0 `glDrawBuffers` |
-| VAOs | **native forward** | GLES 3.0 `glVertexArray*` |
-| `GL_QUADS` / `GL_POLYGON` primitives | **fixed** | rewritten to `TRIANGLES`/`TRIANGLE_FAN`; quad index lists expanded |
-| `GL_TEXTURE_1D` / `GL_TEXTURE_RECTANGLE` | **fixed** | mapped to `GL_TEXTURE_2D` |
-| `GL_CLAMP` / `GL_CLAMP_TO_BORDER` | **fixed** | mapped to `GL_CLAMP_TO_EDGE` |
-| Legacy formats `GL_ALPHA`/`LUMINANCE`/`INTENSITY` | **fixed** | mapped to `GL_RGBA` |
-| `gl_CullDistance` (cull distance) | **best-effort** | rewritten so shaders compile (correctness limited in ES 3.0) |
+Each item below was confirmed against real PojavLauncher issues (#1250, #3445,
+#4310, #5528, #6593) and the community `create-gl4es-stencil-fix` mod.
+
+| # | Real crash / problem | Root cause on GLES | Status | How it's fixed here |
+|---|---|---|---|---|
+| 1 | `GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT` / `GL_FRAMEBUFFER_UNSUPPORTED` at `RenderTarget.enableStencil()` | GLES 3.0 can't attach a standalone `STENCIL_INDEX8` next to a separate `DEPTH_COMPONENT` — needs one combined `DEPTH_STENCIL_ATTACHMENT` (DEPTH24_STENCIL8) | **fixed** | `gl_adapt.c` FBO builder merges depth+stencil; `glCheckFramebufferStatus` returns COMPLETE |
+| 2 | `Could not compile shader` (Create's `GlShader`) | desktop GLSL (`attribute`/`varying`/`texture2D`/`gl_FragColor`/`gl_FragData`) is invalid in ES 3.00 | **fixed** | `glsl_translate` rewrites to ES 3.00 |
+| 3 | `Extension 'GL_EXT_clip_cull_distance' not supported` + `Illegal identifier 'gl_ClipDistance'` (issue #4310) | extension line passed through; driver rejects it | **fixed** | `#extension` lines for emulated/core features are stripped; `gl_ClipDistance` → `_clipDist` varying + fragment `discard` |
+| 4 | `GL_ARB_shader_texture_lod` / `GL_EXT_shader_texture_lod` rejected (Iris/shaders, #6593) | same `#extension` problem | **fixed** | stripped by the same mechanism |
+| 5 | clip/cull distance rendering wrong | no `GL_EXT_clip_cull_distance` in ES 3.0 | **emulated** | discards fragments where clip distance `< 0` |
+| 6 | `GL_QUADS`/`GL_POLYGON` primitives (old mod/renderer code) | removed in GLES | **fixed** | rewritten to `TRIANGLES`/`TRIANGLE_FAN`; quad index lists expanded |
+| 7 | `GL_TEXTURE_1D`/`GL_TEXTURE_RECTANGLE` | don't exist in GLES | **fixed** | mapped to `GL_TEXTURE_2D` |
+| 8 | `GL_CLAMP`/`GL_CLAMP_TO_BORDER` | ES only has `CLAMP_TO_EDGE` | **fixed** | mapped to `CLAMP_TO_EDGE` |
+| 9 | legacy formats `GL_ALPHA`/`LUMINANCE`/`INTENSITY` | removed in ES 3.0 | **fixed** | mapped to `GL_RGBA` |
+| 10 | `texture2DProj`/`shadow2D`/`texture2DGrad` | ES 3.00 names | **fixed** | mapped to `textureProj`/`texture`/`textureGrad` |
+| 11 | transform feedback / vertex pulling | — | **native forward** | GLES 3.0 has real transform feedback |
+| 12 | multiple render targets | — | **native forward** | GLES 3.0 `glDrawBuffers` |
+| 13 | VAOs | — | **native forward** | GLES 3.0 `glVertexArray*` |
 
 `gl_adapt.c` holds the pure enum/primitive translations (unit-tested headless in
 `test_adapt.c`); `glsl_translate.c` holds the shader rewrites; `gl_wrapper.c` routes
@@ -76,7 +81,12 @@ game itself, which this environment lacks). The remaining real-world risks are:
 - The older `glClipPlane()` + `GL_CLIP_PLANEi` form is stored as state but the plane
   equation is only *baked into `gl_ClipDistance`* when the wrapper's shader generator is
   wired to read `g_clip_planes` — that wiring lives in the host renderer, not here.
-- Large mods hit buffer/uniform/extension edge cases that only show up at runtime.
+- `GL_TEXTURE_RECTANGLE` is mapped to `GL_TEXTURE_2D`; mods that use 0..w texcoords
+  (instead of 0..1) would need a shader coord rewrite too.
+- ELEMENT_ARRAY_BUFFER-backed `GL_QUADS` index expansion needs the host's buffer contents;
+  the client-index path is handled, the buffer path needs host support.
+- Several GPU-only features (compute shaders, geometry shaders, `GL_TEXTURE_BUFFER`)
+  that some advanced shader packs use are out of scope for a GLES 3.0 backend.
 - Performance: a pure GLES 3.0 backend trades some features for speed; this is the same
   trade LTW makes.
 

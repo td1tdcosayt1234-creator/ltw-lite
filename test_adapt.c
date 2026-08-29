@@ -37,6 +37,37 @@ int main(void) {
     for (int i = 0; i < 12; i++) if (out[i] != expect[i]) ok = 0;
     CK(ok, "quad expansion indices correct (two tris per quad)");
 
+    /* stencil FBO merge (the #1 Create crash fix) */
+    GLenum rin = 0x8D48; /* STENCIL_INDEX8 */
+    CK(adapt_renderbuffer_storage(&rin) == 1 && rin == 0x88F0, "stencil RB -> DEPTH24_STENCIL8");
+    GLenum din = 0x81A6; /* DEPTH_COMPONENT24 */
+    CK(adapt_renderbuffer_storage(&din) == 1 && din == 0x88F0, "depth RB -> DEPTH24_STENCIL8");
+
+    /* FBO with separate depth + stencil attachments -> single combined */
+    fbo_builder_t b; fbo_builder_init(&b);
+    fbo_builder_add_rb(&b, 0x8D00, 0x81A6, 10); /* DEPTH_ATTACHMENT, DEPTH_COMPONENT24, rb=10 */
+    fbo_builder_add_rb(&b, 0x8D01, 0x8D48, 11); /* STENCIL_ATTACHMENT, STENCIL_INDEX8, rb=11 */
+    GLenum oa[16], oi[16], oo[16]; int ot[16];
+    int rn = fbo_builder_resolve(&b, oa, oi, oo, ot);
+    CK(rn == 1, "depth+stencil merged into 1 attachment");
+    CK(oa[0] == 0x8210 && oi[0] == 0x88F0, "merged attachment = DEPTH_STENCIL(DEPTH24_STENCIL8)");
+    CK(oo[0] == 10, "merged attachment keeps the depth renderbuffer object");
+
+    /* FBO with depth only -> unchanged */
+    fbo_builder_init(&b);
+    fbo_builder_add_rb(&b, 0x8D00, 0x81A6, 10);
+    rn = fbo_builder_resolve(&b, oa, oi, oo, ot);
+    CK(rn == 1 && oa[0] == 0x8D00, "depth-only FBO unchanged");
+
+    /* FBO with color + depth + stencil -> color kept, d/s merged */
+    fbo_builder_init(&b);
+    fbo_builder_add_rb(&b, 0x8CE0, 0x1908, 12); /* COLOR_ATTACHMENT0, RGBA, rb=12 */
+    fbo_builder_add_rb(&b, 0x8D00, 0x81A6, 10);
+    fbo_builder_add_rb(&b, 0x8D01, 0x8D48, 11);
+    rn = fbo_builder_resolve(&b, oa, oi, oo, ot);
+    CK(rn == 2, "color + merged depth-stencil = 2 attachments");
+    CK(oa[0] == 0x8CE0 && oa[1] == 0x8210, "color preserved, d/s merged");
+
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

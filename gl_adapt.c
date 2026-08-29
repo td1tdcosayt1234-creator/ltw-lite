@@ -83,3 +83,82 @@ int expand_quads_to_triangles(int quad_count, const GLuint *q, GLuint *out) {
     }
     return 6 * quad_count;
 }
+
+/* ---- stencil FBO merge ---- */
+
+/* enum constants (desktop/GLES share these numeric values) */
+#define ATT_DEPTH          0x8D00  /* GL_DEPTH_ATTACHMENT */
+#define ATT_STENCIL        0x8D01  /* GL_STENCIL_ATTACHMENT */
+#define ATT_DEPTH_STENCIL 0x8210  /* GL_DEPTH_STENCIL_ATTACHMENT */
+#define FMT_STENCIL8      0x8D48  /* GL_STENCIL_INDEX8 */
+#define FMT_DEPTH24_STENCIL8 0x88F0 /* GL_DEPTH24_STENCIL8 */
+#define FMT_DEPTH_COMPONENT  0x81A5
+#define FMT_DEPTH_COMPONENT16 0x81A5
+#define FMT_DEPTH_COMPONENT24 0x81A6
+#define FMT_DEPTH_COMPONENT32 0x81A7
+#define FMT_DEPTH_COMPONENT32F 0x8CAC
+
+int adapt_renderbuffer_storage(GLenum *internalformat) {
+    GLenum f = *internalformat;
+    if (f == FMT_STENCIL8 ||
+        f == 0x8D47 /* STENCIL_INDEX1 */ || f == 0x8D46 /* STENCIL_INDEX4 */) {
+        *internalformat = FMT_DEPTH24_STENCIL8;
+        return 1;
+    }
+    /* a depth buffer that will share the FBO with stencil -> make it combined */
+    if (f == FMT_DEPTH_COMPONENT || f == FMT_DEPTH_COMPONENT16 ||
+        f == FMT_DEPTH_COMPONENT24 || f == FMT_DEPTH_COMPONENT32 ||
+        f == FMT_DEPTH_COMPONENT32F) {
+        *internalformat = FMT_DEPTH24_STENCIL8;
+        return 1;
+    }
+    return 0;
+}
+
+void fbo_builder_init(fbo_builder_t *b) { b->n = 0; }
+
+void fbo_builder_add_rb(fbo_builder_t *b, GLenum attachment, GLenum internalformat, GLuint rb) {
+    if (b->n < 16) {
+        b->atts[b->n].attachment = attachment;
+        b->atts[b->n].internalformat = internalformat;
+        b->atts[b->n].obj = rb;
+        b->atts[b->n].is_texture = 0;
+        b->n++;
+    }
+}
+
+void fbo_builder_add_tex(fbo_builder_t *b, GLenum attachment, GLuint tex) {
+    if (b->n < 16) {
+        b->atts[b->n].attachment = attachment;
+        b->atts[b->n].internalformat = FMT_DEPTH24_STENCIL8; /* best-effort */
+        b->atts[b->n].obj = tex;
+        b->atts[b->n].is_texture = 1;
+        b->n++;
+    }
+}
+
+int fbo_builder_resolve(const fbo_builder_t *b, GLenum *out_att,
+                        GLenum *out_int, GLuint *out_obj, int *out_tex) {
+    int has_depth = 0, has_stencil = 0;
+    for (int i = 0; i < b->n; i++) {
+        if (b->atts[i].attachment == ATT_DEPTH)    has_depth = 1;
+        if (b->atts[i].attachment == ATT_STENCIL)  has_stencil = 1;
+    }
+    int k = 0, merged = 0;
+    for (int i = 0; i < b->n; i++) {
+        GLenum a = b->atts[i].attachment;
+        GLenum f = b->atts[i].internalformat;
+        GLuint o = b->atts[i].obj;
+        int tx = b->atts[i].is_texture;
+        if (a == ATT_DEPTH) {
+            if (has_stencil && !merged) { out_att[k]=ATT_DEPTH_STENCIL; out_int[k]=FMT_DEPTH24_STENCIL8; out_obj[k]=o; out_tex[k]=tx; k++; merged=1; }
+            else if (!has_stencil)      { out_att[k]=a; out_int[k]=f; out_obj[k]=o; out_tex[k]=tx; k++; }
+        } else if (a == ATT_STENCIL) {
+            if (has_depth && !merged)   { out_att[k]=ATT_DEPTH_STENCIL; out_int[k]=FMT_DEPTH24_STENCIL8; out_obj[k]=o; out_tex[k]=tx; k++; merged=1; }
+            else if (!has_depth)        { out_att[k]=ATT_DEPTH_STENCIL; out_int[k]=FMT_DEPTH24_STENCIL8; out_obj[k]=o; out_tex[k]=tx; k++; merged=1; }
+        } else {
+            out_att[k]=a; out_int[k]=f; out_obj[k]=o; out_tex[k]=tx; k++;
+        }
+    }
+    return k;
+}

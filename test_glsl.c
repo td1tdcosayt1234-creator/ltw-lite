@@ -139,6 +139,35 @@ int main(void) {
     check("texvar", ft, "textureGrad(t, uv, vec2(1.0), vec2(1.0))");
     free(ft);
 
+    /* #extension stripping: GL_EXT_clip_cull_distance must be dropped (it is
+     * the fatal "Extension not supported" error from Pojav issue #4310),
+     * while gl_ClipDistance is emulated via discard. */
+    const char *vext =
+        "#version 320 es\n"
+        "#extension GL_EXT_clip_cull_distance : require\n"
+        "precision highp float;\n"
+        "out float gl_ClipDistance[4];\n"
+        "void main() {\n"
+        "  gl_ClipDistance[0] = 1.0;\n"
+        "  gl_Position = vec4(0.0);\n"
+        "}\n";
+    char *ex = glsl_translate(vext, STAGE_VERTEX);
+    printf("=== VERTEX with #extension (clipped) ===\n%s\n", ex);
+    check_not("ext", ex, "GL_EXT_clip_cull_distance");   /* dropped */
+    check("ext", ex, "out float _clipDist[4];");         /* renamed */
+    check("ext", ex, "_clipDist[0] = 1.0;");
+    free(ex);
+
+    const char *fext =
+        "#version 150\n"
+        "#extension GL_ARB_shader_texture_lod : enable\n"
+        "void main() { gl_FragColor = vec4(1.0); }\n";
+    char *fx = glsl_translate(fext, STAGE_FRAGMENT);
+    printf("=== FRAGMENT with dropped #extension ===\n%s\n", fx);
+    check_not("ext2", fx, "GL_ARB_shader_texture_lod");
+    check("ext2", fx, "_fragColor = vec4(1.0);");
+    free(fx);
+
     printf("\n%d failure(s)\n", failures);
     return failures ? 1 : 0;
 }
