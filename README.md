@@ -44,6 +44,15 @@ without the game knowing.
 | Transform feedback / vertex pulling | **native forward** | GLES 3.0 has real transform feedback |
 | Multiple render targets | **native forward** | GLES 3.0 `glDrawBuffers` |
 | VAOs | **native forward** | GLES 3.0 `glVertexArray*` |
+| `GL_QUADS` / `GL_POLYGON` primitives | **fixed** | rewritten to `TRIANGLES`/`TRIANGLE_FAN`; quad index lists expanded |
+| `GL_TEXTURE_1D` / `GL_TEXTURE_RECTANGLE` | **fixed** | mapped to `GL_TEXTURE_2D` |
+| `GL_CLAMP` / `GL_CLAMP_TO_BORDER` | **fixed** | mapped to `GL_CLAMP_TO_EDGE` |
+| Legacy formats `GL_ALPHA`/`LUMINANCE`/`INTENSITY` | **fixed** | mapped to `GL_RGBA` |
+| `gl_CullDistance` (cull distance) | **best-effort** | rewritten so shaders compile (correctness limited in ES 3.0) |
+
+`gl_adapt.c` holds the pure enum/primitive translations (unit-tested headless in
+`test_adapt.c`); `glsl_translate.c` holds the shader rewrites; `gl_wrapper.c` routes
+desktop calls through both into real GLES.
 
 ## Build & test (no GPU needed)
 

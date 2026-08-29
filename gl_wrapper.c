@@ -1,89 +1,133 @@
 /*
  * gl_wrapper.c -- the GL -> GLES "thin wrapper" dispatch layer.
  *
- * Structural skeleton of how glsl_translate() plugs into a desktop-OpenGL
- * on-GLES backend like LTW. The translator already rewrites shaders so mods
- * like Create get valid GLSL ES 3.00 (no more "vertex error"). This file
- * forwards the remaining desktop-GL entry points to their GLES equivalents
- * and emulates the few things GLES 3.0 lacks.
+ * How glsl_translate() + gl_adapt.c plug into a desktop-OpenGL on-GLES
+ * backend like LTW. GLES entry points are loaded through dlsym (the way a
+ * real wrapper works) so our wrapper functions forward instead of recursing.
  *
  * Build on an Android/embedded target with:
- *     gcc -DLTW_HAVE_GLES -lGLESv2 -lEGL gl_wrapper.c glsl_translate.c
+ *     gcc -DLTW_HAVE_GLES -ldl -lGLESv2 -lEGL gl_wrapper.c glsl_translate.c gl_adapt.c
  */
 #ifdef LTW_HAVE_GLES
 
-#include <GLES3/gl32.h>
+#include <dlfcn.h>
+#include <GLES3/gl3.h>
 #include <GLES3/gl3ext.h>
 #include "glsl_translate.h"
+#include "gl_adapt.h"
+
+#define GL_ADAPT_TYPES  /* GLES already defines GLenum/GLuint */
+
+typedef struct {
+    PFNGLBINDTEXTUREPROC     BindTexture;
+    PFNGLTEXPARAMETERIPROC   TexParameteri;
+    PFNGLTEXIMAGE2DPROC      TexImage2D;
+    PFNGLTEXIMAGE3DPROC      TexImage3D;
+    PFNGLDRAWELEMENTSPROC    DrawElements;
+    PFNGLDRAWARRAYSPROC      DrawArrays;
+    PFNGLENABLEPROC          Enable;
+    PFNGLGETERRORPROC        GetError;
+} GLES;
+
+static GLES G;
+static int g_inited = 0;
+
+static void *sym(void *h, const char *n) {
+    void *p = dlsym(h, n);
+    if (!p) fprintf(stderr, "LTW: missing GLES symbol %s\n", n);
+    return p;
+}
+
+static void ltw_load(void) {
+    void *h = dlopen("libGLESv2.so", RTLD_LAZY);
+    if (!h) { fprintf(stderr, "LTW: cannot load libGLESv2.so\n"); return; }
+    G.BindTexture    = sym(h, "glBindTexture");
+    G.TexParameteri  = sym(h, "glTexParameteri");
+    G.TexImage2D     = sym(h, "glTexImage2D");
+    G.TexImage3D     = sym(h, "glTexImage3D");
+    G.DrawElements   = sym(h, "glDrawElements");
+    G.DrawArrays     = sym(h, "glDrawArrays");
+    G.Enable         = sym(h, "glEnable");
+    G.GetError       = sym(h, "glGetError");
+    g_inited = 1;
+}
 
 /* ---- shader objects: run sources through the translator ---- */
 
-static GLuint gles_compile(GLenum gl_type, const char *src, glsl_stage stage) {
-    char *es_src = glsl_translate(src, stage);
-    GLenum es_type = (gl_type == GL_VERTEX_SHADER) ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
-    GLuint sh = glCreateShader(es_type);
-    const char *p = es_src;
-    glShaderSource(sh, 1, &p, NULL);
-    glCompileShader(sh);
-    free(es_src);
-
-    GLint ok = 0;
-    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        /* this is exactly where Create used to crash with "vertex error" */
-        char log[8192];
-        glGetShaderInfoLog(sh, sizeof(log), NULL, log);
-        fprintf(stderr, "LTW: shader compile failed:\n%s\n", log);
-    }
-    return sh;
-}
-
 void glShaderSourceARB(GLuint obj, GLsizei count, const char **src, const GLint *len) {
     (void)count; (void)len;
-    /* stage tracked per-object in real LTW via a small table */
     glsl_stage stage = (obj & 1) ? STAGE_FRAGMENT : STAGE_VERTEX;
     char *es = glsl_translate(src[0], stage);
     glShaderSource(obj, 1, (const char **)&es, NULL);
     free(es);
 }
 
-/* ---- transform feedback / vertex pulling ----
- * Create relies on transform feedback in places; GLES 3.0 has it natively. */
+/* ---- texture target / wrap / format adaptation ---- */
+
+void glBindTexture(GLenum target, GLuint tex) {
+    if (!g_inited) ltw_load();
+    adapt_texture_target(&target);
+    G.BindTexture(target, tex);
+}
+
+void glTexParameteri(GLenum target, GLenum pname, GLint param) {
+    if (!g_inited) ltw_load();
+    adapt_texture_target(&target);
+    if (pname == 0x2802 /* GL_TEXTURE_WRAP_S */ ||
+        pname == 0x2803 /* GL_TEXTURE_WRAP_T */) {
+        GLenum w = (GLenum)param;
+        adapt_wrap(&w);
+        param = (GLint)w;
+    }
+    G.TexParameteri(target, pname, param);
+}
+
+void glTexImage2D(GLenum target, GLint level, GLint internalformat,
+                  GLsizei w, GLsizei h, GLint border, GLenum format,
+                  GLenum type, const void *pixels) {
+    if (!g_inited) ltw_load();
+    adapt_texture_target(&target);
+    adapt_pixel_format((GLenum*)&internalformat, &format);
+    G.TexImage2D(target, level, internalformat, w, h, border, format, type, pixels);
+}
+
+/* ---- primitive adaptation (GL_QUADS / GL_POLYGON) ---- */
+
+void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    if (!g_inited) ltw_load();
+    adapt_primitive(&mode);
+    G.DrawArrays(mode, first, count);
+}
+
+void glDrawElements(GLenum mode, GLsizei count, GLenum type,
+                    const void *indices) {
+    if (!g_inited) ltw_load();
+    GLenum m = mode;
+    if (adapt_primitive(&m)) {
+        if (mode == 0x0007 && indices != NULL) { /* was QUADS, client indices */
+            int quads = count / 4;
+            GLuint *exp = malloc(sizeof(GLuint) * 6 * quads);
+            const GLuint *src = (const GLuint *)indices; /* assumes uint indices */
+            int outn = expand_quads_to_triangles(quads, src, exp);
+            G.DrawElements(0x0004, outn, type, exp); /* TRIANGLES */
+            free(exp);
+            return;
+        }
+        /* GL_ELEMENT_ARRAY_BUFFER-backed quads: expansion must happen in the
+         * host that owns the buffer; document and fall back to fan-safe path */
+    }
+    G.DrawElements(m, count, type, indices);
+}
+
+/* ---- the remaining native forwards (unchanged from before) ---- */
+
 void glBeginTransformFeedback(GLenum prim)      { glBeginTransformFeedback(prim); }
 void glEndTransformFeedback(void)               { glEndTransformFeedback(); }
 void glBindBufferBase(GLenum target, GLuint i, GLuint buf) { glBindBufferBase(target, i, buf); }
-
-/* ---- vertex array objects (native in GLES 3.0) ---- */
 void glGenVertexArrays(GLsizei n, GLuint *a)    { glGenVertexArrays(n, a); }
 void glBindVertexArray(GLuint a)                { glBindVertexArray(a); }
 void glDeleteVertexArrays(GLsizei n, GLuint *a) { glDeleteVertexArrays(n, a); }
-
-/* ---- multiple render targets (native in GLES 3.0) ---- */
-void glDrawBuffers(GLsizei n, const GLenum *bufs) { glDrawBuffers(n, bufs); }
-
-/* ---- point size (native; just enable) ---- */
-void glPointSize(GLfloat s) { glPointSize(s); }
-
-/* ---- user clip planes (GLES 3.0 has NO clip planes) ----
- * Emulated in the shader: gl_ClipDistance[i] is rewritten to a varying and the
- * fragment shader discards fragments where it is < 0 (see glsl_translate).
- * The older glClipPlane()/GL_CLIP_PLANEi API writes a plane equation that the
- * real LTW would bake into the generated gl_ClipDistance expression. */
-static float g_clip_planes[6][4];
-static int   g_clip_enabled[6];
-
-void glClipPlane(GLenum plane, const GLdouble *eq) {
-    int i = plane - GL_CLIP_PLANE0;
-    if (i < 0 || i > 5) return;
-    for (int k = 0; k < 4; k++) g_clip_planes[i][k] = (float)eq[k];
-    /* g_clip_enabled[i] is set by glEnable(GL_CLIP_PLANEi); the shader
-     * generator injects: _clipDist[i] = dot(gl_Position, plane_eq); */
-}
-
-void glGetClipPlane(GLenum plane, GLdouble *eq) {
-    int i = plane - GL_CLIP_PLANE0;
-    if (i < 0 || i > 5) return;
-    for (int k = 0; k < 4; k++) eq[k] = g_clip_planes[i][k];
-}
+void glDrawBuffers(GLsizei n, const GLenum *b)  { glDrawBuffers(n, b); }
+void glPointSize(GLfloat s)                     { glPointSize(s); }
 
 #endif /* LTW_HAVE_GLES */
