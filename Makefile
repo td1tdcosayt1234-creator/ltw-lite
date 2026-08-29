@@ -6,7 +6,7 @@
 CC      ?= gcc
 CFLAGS  ?= -std=c99 -Wall -Wextra
 
-TESTS = test_glsl test_adapt
+TESTS = test_glsl test_adapt test_ltw
 
 all: test
 
@@ -19,6 +19,9 @@ test_glsl: glsl_translate.c test_glsl.c glsl_translate.h
 
 test_adapt: gl_adapt.c test_adapt.c gl_adapt.h glsl_translate.h
 	$(CC) $(CFLAGS) -o $@ gl_adapt.c test_adapt.c
+
+test_ltw: ltw_glue.c test_ltw.c ltw_glue.h glsl_translate.h
+	$(CC) $(CFLAGS) -o $@ ltw_glue.c test_ltw.c glsl_translate.c
 
 # Requires GLES/EGL headers + libs (e.g. on an Android NDK / Mesa host).
 gles: gl_wrapper.c glsl_translate.c gl_adapt.c
