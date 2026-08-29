@@ -89,7 +89,7 @@ int expand_quads_to_triangles(int quad_count, const GLuint *q, GLuint *out) {
 /* enum constants (desktop/GLES share these numeric values) */
 #define ATT_DEPTH          0x8D00  /* GL_DEPTH_ATTACHMENT */
 #define ATT_STENCIL        0x8D01  /* GL_STENCIL_ATTACHMENT */
-#define ATT_DEPTH_STENCIL 0x8210  /* GL_DEPTH_STENCIL_ATTACHMENT */
+#define ATT_DEPTH_STENCIL 0x821A  /* GL_DEPTH_STENCIL_ATTACHMENT */
 #define FMT_STENCIL8      0x8D48  /* GL_STENCIL_INDEX8 */
 #define FMT_DEPTH24_STENCIL8 0x88F0 /* GL_DEPTH24_STENCIL8 */
 #define FMT_DEPTH_COMPONENT  0x81A5
